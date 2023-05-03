@@ -1,0 +1,177 @@
+package oracle.cloud.adapter.ebay.runtime.digitalsignature;
+
+import oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConstants;
+import oracle.cloud.connector.api.CloudInvocationException;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.openssl.PEMException;
+import org.bouncycastle.openssl.PEMParser;
+import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
+import java.io.*;
+import java.security.PrivateKey;
+import java.security.Security;
+import java.util.List;
+
+public class EbaySignatureConfig {
+
+    private String digestAlgorithm;
+
+    private String algorithm;
+
+    private String privateKeyStr;
+
+    private String jwe;
+
+    public List<String> signatureParams;
+
+    private PrivateKey privateKey;
+
+    private String method;
+
+    private String authority;
+
+    private String path;
+
+
+    public EbaySignatureConfig() {
+        Security.addProvider(new BouncyCastleProvider());
+    }
+
+    public void setDigestAlgorithm(String digestAlgorithm) {
+        this.digestAlgorithm = digestAlgorithm;
+    }
+
+    public void setPrivateKeyStr(String privateKeyStr) {
+        this.privateKeyStr = privateKeyStr;
+    }
+
+    public void setJwe(String jwe) {
+        this.jwe = jwe;
+    }
+
+
+    public void setAlgorithm(String algorithm) {
+        this.algorithm = algorithm;
+    }
+    /**
+     * Get digest algorithm
+     * @return digest algo
+     */
+    public String getDigestAlgorithm() {
+        return digestAlgorithm;
+    }
+
+    /**
+     * Get signing algorithm
+     * @return signing algorithm
+     */
+    public String getAlgorithm() {
+        return algorithm;
+    }
+
+    /**
+     * Get JWE string
+     * @return JWE string
+     */
+    public String getJwe() {
+        return jwe;
+    }
+
+    public List<String> getSignatureParams() {
+        return signatureParams;
+    }
+
+    public void setSignatureParams(List<String> signatureParams) {
+        this.signatureParams = signatureParams;
+    }
+
+    /**
+     * @return privateKey private key
+     */
+    public PrivateKey getPrivateKey() throws CloudInvocationException {
+        if (privateKey != null) {
+            return privateKey;
+        }
+        Reader reader = null;
+        if (privateKeyStr.contains(EbayCloudAdapterConstants.BEGIN_OF_PKEY)) {
+            reader = new StringReader(privateKeyStr);
+        } else {
+          String pKeyStart=EbayCloudAdapterConstants.BEGIN_OF_PKEY;
+                String privateK=pKeyStart+"\n"+privateKeyStr+"\n"+EbayCloudAdapterConstants.END_OF_PKEY;
+                reader = new StringReader(privateK);
+        }
+        privateKey = getPrivate(reader);
+        return privateKey;
+    }
+
+    /**
+     * @return privateKey private key
+     */
+    private PrivateKey getPrivate(Reader reader) throws CloudInvocationException {
+        try {
+            PEMParser pemParser = new PEMParser(reader);
+            JcaPEMKeyConverter converter = new JcaPEMKeyConverter();
+            PrivateKeyInfo privateKeyInfo = PrivateKeyInfo
+                    .getInstance(pemParser.readObject());
+            return converter.getPrivateKey(privateKeyInfo);
+        } catch (PEMException ex) {
+            throw new CloudInvocationException(
+                    "Error parsing private key: " + ex.getMessage(), ex);
+        } catch (IOException e) {
+            throw new CloudInvocationException(
+                    "Error loading private file: " + e.getMessage(), e);
+        }
+    }
+    public String getMethod() {
+        return method;
+    }
+
+    /**
+     * Set Method type
+     *
+     * @param method method type
+     */
+    public void setMethod(String method) {
+        this.method = method;
+    }
+
+    /**
+     * Get Authority
+     *
+     * @return authority
+     */
+    public String getAuthority() {
+        return authority;
+    }
+
+    /**
+     * Set Authority
+     *
+     * @param authority authority
+     */
+    public void setAuthority(String authority) {
+        this.authority = authority;
+    }
+
+    /**
+     * Get the path
+     *
+     * @return path
+     */
+    public String getPath() {
+        return path;
+    }
+
+    /**
+     * Set Path
+     *
+     * @param path path
+     */
+
+    public void setPath(String path) {
+
+        this.path = path;
+    }
+
+
+}

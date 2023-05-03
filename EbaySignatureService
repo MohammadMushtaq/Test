@@ -1,0 +1,167 @@
+package oracle.cloud.adapter.ebay.runtime.digitalsignature;
+
+
+import oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConstants;
+import oracle.cloud.connector.api.CloudInvocationException;
+import org.apache.commons.lang3.StringUtils;
+import org.bouncycastle.crypto.CryptoException;
+import org.bouncycastle.crypto.Signer;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.params.AsymmetricKeyParameter;
+import org.bouncycastle.crypto.signers.Ed25519Signer;
+import org.bouncycastle.crypto.signers.RSADigestSigner;
+import org.bouncycastle.crypto.util.PrivateKeyFactory;
+import org.bouncycastle.util.encoders.Base64;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
+public class EbaySignatureService {
+
+    /**
+     * Generate Content Digest
+     */
+    public String generateContentDigest(String body, EbaySignatureConfig signatureConfig) throws CloudInvocationException {
+        if(StringUtils.isBlank(body)){
+            return null;
+        }
+
+        String contentDigest = "";
+        String cipher = signatureConfig.getDigestAlgorithm();
+        try {
+            MessageDigest messageDigest = MessageDigest
+                    .getInstance(cipher.toUpperCase());
+            String digest = new String(Base64.encode(
+                    messageDigest.digest(body.getBytes(StandardCharsets.UTF_8))));
+            if (StringUtils.isNotBlank(digest)) {
+                contentDigest = new StringBuilder().append(cipher).append("=:")
+                        .append(digest).append(":").toString();
+            }
+
+        } catch (Exception ex) {
+            throw new CloudInvocationException(
+                    "Error generating Content-Digest header: " + ex.getMessage(),
+                    ex);
+        }
+        return contentDigest;
+
+    }
+
+    /**
+     * Generate Signature Input header
+     * @return signatureInputHeader
+     */
+    public String getSignatureInput(String contentDigest, List<String> signatureParams) {
+        StringBuilder signatureInputBuf = new StringBuilder();
+        signatureInputBuf.append("(");
+
+        for (int i = 0; i < signatureParams.size(); i++) {
+            String param = signatureParams.get(i);
+            if(param.equalsIgnoreCase(EbayCloudAdapterConstants.CONTENT_DIGEST) && contentDigest==null){
+                continue;
+            }
+            signatureInputBuf.append("\"");
+            signatureInputBuf.append(param);
+            signatureInputBuf.append("\"");
+            if (i < signatureParams.size() - 1) {
+                signatureInputBuf.append(" ");
+            }
+        }
+
+        signatureInputBuf.append(");created=");
+        signatureInputBuf.append(Instant.now().getEpochSecond());
+
+        return signatureInputBuf.toString();
+    }
+
+    /**
+     *
+     * Get 'Signature' header value
+     * @return signature signature
+     */
+    public String getSignature(Map<String, String> headers,
+                               EbaySignatureConfig signatureConfig) throws CloudInvocationException {
+        try {
+            String baseString = calculateBase(headers, signatureConfig);
+            byte[] base = baseString.getBytes(StandardCharsets.UTF_8);
+
+            Signer signer;
+            if (signatureConfig.getAlgorithm().equals(EbayCloudAdapterConstants.ALGORITHM_RSA)) {
+                signer = new RSADigestSigner(new SHA256Digest());
+            } else {
+                signer = new Ed25519Signer();
+            }
+            AsymmetricKeyParameter privateKeyParameters = PrivateKeyFactory
+                    .createKey(signatureConfig.getPrivateKey().getEncoded());
+            signer.init(true, privateKeyParameters);
+            signer.update(base, 0, base.length);
+            byte[] signature = signer.generateSignature();
+
+            String signatureStr = new String(Base64.encode(signature));
+            return new StringBuilder().append(EbayCloudAdapterConstants.SIGNATURE_PREFIX).append(signatureStr)
+                    .append(":").toString();
+        } catch (CryptoException | IOException ex) {
+            throw new CloudInvocationException(
+                    "Error creating value for signature: " + ex.getMessage(), ex);
+        }
+    }
+
+
+    /**
+     * Method to calculate base string value
+     * @return calculatedBase base string
+     */
+    String calculateBase(Map<String, String> headers,
+                         EbaySignatureConfig signatureConfig) throws CloudInvocationException {
+        try {
+            StringBuilder buf = new StringBuilder();
+            List<String> signatureParams = signatureConfig.getSignatureParams();
+            for (String header : signatureParams) {
+                if (header.equalsIgnoreCase(EbayCloudAdapterConstants.CONTENT_DIGEST)
+                        && headers.get(EbayCloudAdapterConstants.CONTENT_DIGEST) == null) {
+                    continue;
+                }
+                buf.append("\"");
+                buf.append(header.toLowerCase());
+                buf.append("\": ");
+
+                if (header.startsWith("@")) {
+                    switch (header.toLowerCase()) {
+                        case "@method":
+                            buf.append(signatureConfig.getMethod());
+                            break;
+                        case "@authority":
+                            buf.append(signatureConfig.getAuthority());
+                            break;
+                        case "@path":
+                            buf.append(signatureConfig.getPath());
+                            break;
+                        default:
+                            throw new CloudInvocationException(
+                                    "Unknown pseudo header " + header);
+                    }
+                } else {
+                    if (!headers.containsKey(header)) {
+                        throw new CloudInvocationException(
+                                "Header " + header + " not included in message");
+                    }
+
+                    buf.append(headers.get(header));
+                }
+
+                buf.append("\n");
+            }
+
+            buf.append("\"@signature-params\": ");
+            buf.append(getSignatureInput(headers.get(EbayCloudAdapterConstants.CONTENT_DIGEST), signatureParams));
+            return buf.toString();
+        } catch (Exception ex) {
+            throw new CloudInvocationException(
+                    "Error calculating signature base: " + ex.getMessage(), ex);
+        }
+    }
+
+}

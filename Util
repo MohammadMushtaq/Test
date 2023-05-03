@@ -1,0 +1,469 @@
+package oracle.cloud.adapter.ebay.util;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
+import java.util.Set;
+
+import oracle.cloud.adapter.ebay.runtime.EbayMessageHandler;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+
+import oracle.cloud.adapter.common.api.util.CommonUtils;
+import oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConnection;
+import oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConstants;
+import oracle.cloud.adapter.ebay.designtime.EbayMetaDataBrowser;
+import oracle.cloud.adapter.ebay.designtime.EbayMetaDataBrowser.AuthSchemeArtifacts;
+import oracle.cloud.connectivity.services.util.VersionUtil;
+import oracle.cloud.connector.api.CloudAdapterLoggingService;
+import oracle.cloud.connector.api.CloudInvocationException;
+import oracle.cloud.connector.api.CloudMessage;
+import oracle.cloud.connector.api.MessageHeader;
+import oracle.cloud.connector.impl.DefaultLoggingServiceImpl;
+import oracle.cloud.connector.impl.rest.URLEncoderDecoder;
+import oracle.cloud.security.oauth.client.AuthConstants.CREDENTIAL_PROPERTY;
+import oracle.tip.adapter.api.CredentialStoreFrameworkWrapper;
+import oracle.tip.adapter.fw.security.CredentialStoreFrameworkWrapperImpl;
+import oracle.tip.tools.adapters.cloud.api.CloudAdapterConstants;
+import oracle.tip.tools.adapters.cloud.api.CloudAdapterException;
+import oracle.tip.tools.ide.adapters.cloud.api.connection.CloudConnection;
+import oracle.tip.tools.ide.adapters.cloud.api.metadata.OperationMapping;
+import oracle.tip.tools.ide.adapters.cloud.api.model.Annotation;
+import oracle.tip.tools.ide.adapters.cloud.api.model.CloudDataObjectNode;
+import oracle.tip.tools.ide.adapters.cloud.api.model.CloudOperationNode;
+import oracle.tip.tools.ide.adapters.cloud.api.model.DataType;
+import oracle.tip.tools.ide.adapters.cloud.api.model.Field;
+import oracle.tip.tools.ide.adapters.cloud.api.model.TransformationModel;
+import oracle.tip.tools.ide.adapters.cloud.api.plugin.AdapterConstants;
+import oracle.tip.tools.ide.adapters.cloud.api.plugin.AdapterPluginContext;
+import oracle.tip.tools.ide.adapters.cloud.impl.metadata.model.NormalizedField;
+import oracle.tip.tools.ide.adapters.cloud.impl.metadata.model.TransformationModelBuilder;
+import oracle.tip.tools.ide.adapters.cloud.impl.metadata.model.rest.RESTCloudOperationNodeImpl;
+import oracle.tip.tools.ide.adapters.cloud.impl.metadata.model.rest.RESTCloudOperationNodeImpl.HttpMethod;
+import oracle.tip.tools.presentation.uiobjects.sdk.EditField;
+import oracle.tip.tools.presentation.uiobjects.sdk.UIFactory;
+import oracle.tip.tools.presentation.uiobjects.sdk.UIObject;
+
+/**
+ * @author Tushar.Srivastava
+ */
+public class EbayUtil {
+
+    private EbayUtil() {
+
+    }
+
+    private static final CloudAdapterLoggingService log = new DefaultLoggingServiceImpl(EbayUtil.class.getName());
+    private static Map<String, Object> yamlMap;
+    private static Map<String, String> endpointyamlMap;
+    private static Map<String, ArrayList<String>> digitalyamlMap;
+    private static final ObjectMapper objYamlMapper = new ObjectMapper(new YAMLFactory());
+
+    public static void createOrUpdateField(LinkedList<EditField> editFields, String fieldName, String fieldLabel,
+                                           String description, boolean isRequired, boolean isDisabled, UIObject uiObj,
+                                           EditField.LabelFieldLayout labelFieldLayout, String helpText, int rowIdentifier,
+                                           EditField.LabelFieldAlignment oneRowLabelFieldAlignment) {
+        EditField editField;
+        Map<String, EditField> fieldsMap = EditField.getFieldMap(editFields.toArray(new EditField[0]));
+        editField = fieldsMap.get(fieldName);
+
+        if (editField != null) {
+            int index = editFields.indexOf(editField);
+            editFields.remove(index);
+            editFields.add(index, UIFactory.createEditField(fieldName, fieldLabel, description, isRequired, isDisabled,
+                    uiObj, labelFieldLayout, helpText, editField.getRowIdentifier(), oneRowLabelFieldAlignment));
+        } else {
+            editFields.add(UIFactory.createEditField(fieldName, fieldLabel, description, isRequired, isDisabled, uiObj,
+                    labelFieldLayout, helpText, rowIdentifier, oneRowLabelFieldAlignment));
+        }
+
+    }
+
+    public static void stampVersion(AdapterPluginContext context, boolean refreshVersionInEditMode) {
+        if (Boolean.TRUE.equals((isEditMode(context))) && (!refreshVersionInEditMode))
+            retainVersion(context);
+        else
+            stampLatestVersion(context);
+    }
+
+    public static Boolean isEditMode(AdapterPluginContext context) {
+        Object editMode = context.getContextObject(CloudAdapterConstants.UI_RE_ENTRANT_MODE);
+        if ((editMode instanceof Boolean)) {
+            return (Boolean) editMode;
+        }
+        return Boolean.FALSE;
+    }
+
+    private static void stampLatestVersion(AdapterPluginContext context) {
+        EbayCloudAdapterConnection cloudConnection = (EbayCloudAdapterConnection) context
+                .getContextObject(AdapterConstants.CONNECTION);
+        Properties connProps = cloudConnection.getConnectionProperties();
+
+        String sdkVersion = VersionUtil.getSDKVersion(context);
+        if (!CommonUtils.isNull(sdkVersion)) {
+            connProps.put(AdapterConstants.SDK_VERSION, sdkVersion);
+        }
+        String pluginVersion = VersionUtil.getPluginVersion(context);
+        if (!CommonUtils.isNull(pluginVersion))
+            connProps.put(AdapterConstants.PLUGIN_VERSION, pluginVersion);
+
+    }
+
+    private static void retainVersion(AdapterPluginContext context) {
+        Properties existingProps = (Properties) context.getContextObject(AdapterConstants.CONNECTION_PROPERTIES);
+        if (existingProps != null) {
+            EbayCloudAdapterConnection cloudConnection = (EbayCloudAdapterConnection) context
+                    .getContextObject(AdapterConstants.CONNECTION);
+            Properties connProps = cloudConnection.getConnectionProperties();
+            String sdkVersion = (String) existingProps.get(AdapterConstants.SDK_VERSION);
+            if (!CommonUtils.isNull(sdkVersion)) {
+                connProps.put(AdapterConstants.SDK_VERSION, sdkVersion);
+            }
+            String pluginVersion = (String) existingProps.get(AdapterConstants.PLUGIN_VERSION);
+            if (!CommonUtils.isNull(pluginVersion))
+                connProps.put(AdapterConstants.PLUGIN_VERSION, pluginVersion);
+        }
+
+    }
+
+    public static CloudConnection getCloudConnection(AdapterPluginContext adapterContext) {
+        return (CloudConnection) adapterContext.getContextObject(AdapterConstants.CONNECTION);
+    }
+
+    public static String getFormattedApiVersionForURl(String apiVersion,
+                                                      String apiType) {
+        if (apiVersion != null && !apiVersion.contains("v")) {
+            apiVersion = "v".concat(apiVersion.replace('.', '_'));
+        }
+        /*
+         * special handling for marketplace insights
+         * Whose version is v1_beta
+         */
+        if (apiType.equals("marketplace_insights")) {
+            apiVersion = "v1_beta";
+        }
+        return apiVersion;
+    }
+
+    public static String getBaseUrlWithSuffix(String baseUrl, String apiVersion, String apiType, String collection,
+                                              String resourceUri) {
+        apiVersion = getFormattedApiVersionForURl(apiVersion, apiType);
+        baseUrl = baseUrl + collection + "/" + apiType + "/" + apiVersion + resourceUri;
+        return baseUrl;
+    }
+
+    public static TransformationModelBuilder getTransformationModelBuilder(AdapterPluginContext adapterPluginContext) {
+        Boolean regenMode = (Boolean) adapterPluginContext
+                .getContextObject(EbayCloudAdapterConstants.CLOUD_ADAPTER_REGEN_MODE);
+        boolean isRegen = regenMode != null && regenMode;
+        if (isRegen) {
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            Map<String, TransformationModelBuilder> modelBuilderMap = (Map) adapterPluginContext
+                    .getContextObject(CloudAdapterConstants.UI_MODEL_BUILDER_MAP);
+
+            return modelBuilderMap.get("REQUEST");
+
+        }
+
+        return (TransformationModelBuilder) adapterPluginContext
+                .getContextObject(CloudAdapterConstants.UI_MODEL_BUILDER);
+    }
+
+    public static boolean isArray(DataType dataType) {
+
+        return (dataType != null && dataType.equals(DataType.ARRAY));
+    }
+
+    public static String getHeaderValue(List<MessageHeader> headerList, String headerName) {
+        String headerValue = "";
+        for (MessageHeader h : headerList) {
+            if (h.getHeaderName().equalsIgnoreCase(headerName)) {
+                headerValue = (String) h.getValue();
+                break;
+            }
+        }
+        return headerValue;
+    }
+
+    /*
+     * Replacing "api" with "apiz" in some operations of fulfillment
+     */
+    @SuppressWarnings("unchecked")
+    public static String getEndpoint(String entity, String oprName, String url) {
+
+        if (endpointyamlMap == null) {
+            ClassLoader cl = EbayUtil.class.getClassLoader();
+            try (InputStream is = cl.getResourceAsStream("EbayEndpointUrl.yaml")) {
+                endpointyamlMap = objYamlMapper.readValue(is, Map.class);
+            } catch (IOException e) {
+                throw new CloudAdapterException(e);
+            }
+        }
+        String opr = endpointyamlMap.get(entity);
+        if (opr.contains(oprName)) {
+            url = url.replace("api", "apiz");
+        }
+        return url;
+    }
+
+    public static String appendRequiredQueryParam(String url, Properties connectionProps) throws Exception {
+        Map<String, String> credentials = getCredentials(connectionProps);
+        String clentId = credentials.get(CREDENTIAL_PROPERTY.KEY_CLIENTID);
+        if (clentId != null) {
+            url = url.concat("?client_id=" + clentId);
+        }
+        return url;
+    }
+
+    public static Map<String, String> getCredentials(Properties connectionProps) throws Exception {
+        CredentialStoreFrameworkWrapper wrapper = new CredentialStoreFrameworkWrapperImpl();
+        return wrapper.getCSFCredentials((String) connectionProps.get("csfMap"),
+                (String) connectionProps.get("csfkey"));
+    }
+
+    public static void renameNamespaceRecursive(Document doc, Node node, String namespace, String prefix) {
+        if (node.getNodeType() == Node.ELEMENT_NODE) {
+            doc.renameNode(node, namespace, node.getLocalName());
+            node.setPrefix(prefix);
+            NodeList list = node.getChildNodes();
+            for (int i = 0; i < list.getLength(); ++i) {
+                Node childNode = list.item(i);
+                renameNamespaceRecursive(doc, childNode, namespace, prefix);
+            }
+        }
+
+    }
+
+    public static void transformXMLResponse(CloudMessage paramCloudMessage) throws CloudInvocationException {
+        NodeList list = null;
+        if (paramCloudMessage != null) {
+            Document msgPayload = paramCloudMessage.getMessagePayloadAsDocument();
+            if (msgPayload != null) {
+                Node firstChild = msgPayload.getFirstChild();
+                if (firstChild != null) {
+                    list = firstChild.getChildNodes();
+                }
+            }
+        }
+        if (list != null) {
+            for (int i = 0; i < list.getLength(); ++i) {
+                Node childNode = list.item(i);
+                String namespaceUri = childNode.getNamespaceURI();
+                EbayUtil.renameNamespaceRecursive(paramCloudMessage.getMessagePayloadAsDocument(), childNode,
+                        namespaceUri, "");
+            }
+        }
+    }
+
+    public static Field createField(String name, String displayName, CloudDataObjectNode fieldType, boolean array,
+                                    boolean required, boolean nullable) {
+        Field field = new NormalizedField(name, fieldType, array, required, nullable);
+        field.addAnnotation(Annotation.TITLE, displayName);
+        return field;
+    }
+
+    public static boolean isSearchOperation(String operationType) {
+        return operationType != null && operationType.equals(EbayCloudAdapterConstants.RADIO_SEARCH_OP);
+    }
+
+    public static boolean isCustomObjectType(String objectType) {
+        return objectType != null && objectType.equals(EbayCloudAdapterConstants.RADIO_CUSTOM_OBJECT_VALUE);
+    }
+
+    public static String getUrlEncodedScopes(String scopesParam) {
+        String[] scopes = scopesParam.split(",");
+        StringBuilder encodedScopesBuilder = new StringBuilder();
+        for (String scope : scopes) {
+            encodedScopesBuilder.append(scope.trim()).append(" ");
+        }
+        return URLEncoderDecoder.encode(encodedScopesBuilder.toString().trim());
+    }
+
+    public static String convertStreamToString(InputStream inputStream) {
+        StringBuilder sb = new StringBuilder();
+        String line;
+        try (java.io.BufferedReader br = new java.io.BufferedReader(
+                new java.io.InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+            while ((line = br.readLine()) != null) {
+                sb.append(line);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        return sb.toString();
+
+    }
+
+    // List of supported module
+    public static Set<String> getEbayModuleSet(Map<String, AuthSchemeArtifacts> ebayCollection) {
+        Set<String> modules = new HashSet<>();
+        for (Map.Entry<String, AuthSchemeArtifacts> map : ebayCollection.entrySet()) {
+            modules.add(map.getKey());
+        }
+        return modules;
+    }
+
+    // Converting method from json file to HttpMethod
+    public static HttpMethod getMethod(String methodName) {
+        HttpMethod method;
+        switch (methodName) {
+            case "delete":
+                method = HttpMethod.DELETE;
+                break;
+            case "post":
+                method = HttpMethod.POST;
+                break;
+            case "put":
+                method = HttpMethod.PUT;
+                break;
+            default:
+                method = HttpMethod.GET;
+        }
+        return method;
+    }
+
+    // Organizing operation names
+    public static String formatCamelCaseToSpaceSperatedString(String operationName) {
+        String formatedOperationName = "";
+        String[] strinTokenArr = operationName.trim().split(EbayCloudAdapterConstants.OPERATION_FORMATING_REGEX);
+        if (strinTokenArr.length != 0) {
+            String spaceSepratedString = String.join(" ", Arrays.asList(strinTokenArr));
+            formatedOperationName = spaceSepratedString.trim().substring(0, 1).toUpperCase()
+                    + spaceSepratedString.trim().substring(1).toLowerCase();
+        }
+        return formatedOperationName;
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static List<OperationMapping> getOperationMappings(AdapterPluginContext adapterPluginContext) {
+        boolean isRegenerationMode = false;
+        TransformationModel transformationModel;
+
+        if (adapterPluginContext.getContextObject("cloud.adapter.regenerationMode") != null)
+            isRegenerationMode = (Boolean) adapterPluginContext.getContextObject("cloud.adapter.regenerationMode");
+
+        if (isRegenerationMode) {
+            return ((TransformationModel) ((Map) adapterPluginContext.getContextObject("XFORMATION_MODEL_MAP"))
+                    .get("REQUEST")).getOperationMappings();
+        } else {
+            transformationModel = getTransformationModel(adapterPluginContext);
+            if (Objects.nonNull(transformationModel)) {
+                return transformationModel.getOperationMappings();
+            }
+        }
+        return new ArrayList<>();
+    }
+
+    public static TransformationModel getTransformationModel(AdapterPluginContext adapterPluginContext) {
+        TransformationModelBuilder transformationModel = getTransformationModelBuilder(adapterPluginContext,
+                CloudAdapterConstants.UI_MODEL_BUILDER);
+        if (Objects.nonNull(transformationModel)) {
+            return transformationModel.build();
+        }
+        return null;
+    }
+
+    public static TransformationModelBuilder getTransformationModelBuilder(AdapterPluginContext adapterPluginContext,
+                                                                           String type) {
+        return (TransformationModelBuilder) adapterPluginContext.getContextObject(type);
+
+    }
+
+    public static boolean isOperationMappingEmpty(List<OperationMapping> opMapping) {
+        return (Objects.isNull(opMapping) || opMapping.isEmpty());
+    }
+
+    public static RESTCloudOperationNodeImpl getRESTCloudOperationFromPathAndMethod(AdapterPluginContext context,
+                                                                                    String formatedPath, String method) {
+
+        List<CloudOperationNode> operations = context.getCloudApplicationModel().getOperations();
+        for (CloudOperationNode operation : operations) {
+            String oprType = operation.getNodeAttributes().get(EbayCloudAdapterConstants.METHOD_TAG).toString();
+            if (operation.getOperationPath().equals(formatedPath) && oprType.equalsIgnoreCase(method)) {
+                return (RESTCloudOperationNodeImpl) operation;
+            }
+        }
+
+        return null;
+
+    }
+
+    // Gen 3 is not supporting this class "HttpMethod"
+    public static boolean isRequestPayload(String httpMethod, CloudDataObjectNode dataObject) {
+
+        boolean isGetOrDel = httpMethod.equalsIgnoreCase("GET") || httpMethod.equalsIgnoreCase("DELETE");
+        boolean isParam = dataObject.getName().equals(EbayCloudAdapterConstants.TEMPLATE_PARAMETERS)
+                || dataObject.getName().equals(EbayCloudAdapterConstants.QUERY_PARAMETERS);
+        return (!((dataObject.getName() == null) || isGetOrDel || isParam));
+    }
+
+    public static void logError(String msg, Throwable ex) {
+        log.logError(msg, ex);
+    }
+
+    public static void createLineSeperator(LinkedList<EditField> editFields, String fieldName, String fieldLabel,
+                                           String desc, int row, boolean required) {
+        UIObject uiobject = UIFactory.createSeparatorObject();
+
+        createOrUpdateField(editFields, fieldName, fieldLabel, desc, required, false, uiobject,
+                EditField.LabelFieldLayout.ONE_ROW_LAYOUT, desc, row, EditField.LabelFieldAlignment.LEFT_LEFT);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static Object getYamlProperties(String property) {
+        if (yamlMap == null) {
+            ClassLoader cl = EbayMetaDataBrowser.class.getClassLoader();
+            try (InputStream is = cl.getResourceAsStream("EbayScopes.yaml")) {
+                yamlMap = objYamlMapper.readValue(is, Map.class);
+            } catch (IOException e) {
+                throw new CloudAdapterException(e);
+            }
+        }
+        return yamlMap.get(property);
+    }
+
+    public static String findOperationSupportDgtlSign(String targetName) {
+        try {
+            ClassLoader cl = EbayMessageHandler.class.getClassLoader();
+            InputStream operation = cl.getResourceAsStream("EbayDigitalOperation.yaml");
+            digitalyamlMap = objYamlMapper.readValue(operation, Map.class);
+            for (Map.Entry<String, ArrayList<String>> opr : digitalyamlMap.entrySet()) {
+                if (opr.getValue().contains(targetName)) {
+                    return targetName;
+                }
+            }
+        } catch (IOException exception) {
+            throw new CloudAdapterException(exception);
+        }
+        return null;
+    }
+
+    public static List<String> findRegionSupportDgtlSign() {
+        try {
+            ClassLoader cl = EbayMessageHandler.class.getClassLoader();
+            InputStream region = cl.getResourceAsStream("EbayDigitalSignatureRegion.yaml");
+            digitalyamlMap = objYamlMapper.readValue(region, Map.class);
+            for (Map.Entry<String, ArrayList<String>> opr : digitalyamlMap.entrySet()) {
+                ArrayList<String> list = opr.getValue();
+                return list;
+            }
+        } catch (IOException exception) {
+            throw new CloudAdapterException(exception);
+        }
+        return null;
+    }
+
+}
