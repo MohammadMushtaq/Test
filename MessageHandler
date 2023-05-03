@@ -1,0 +1,294 @@
+/**
+ *
+ */
+package oracle.cloud.adapter.ebay.runtime;
+
+
+import java.io.*;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import javax.ws.rs.HttpMethod;
+import javax.ws.rs.core.MediaType;
+import javax.xml.namespace.QName;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import oracle.cloud.adapter.common.api.util.StringUtils;
+import oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConstants;
+import oracle.cloud.adapter.ebay.runtime.digitalsignature.EbaySignature;
+import oracle.cloud.adapter.ebay.util.EbayUtil;
+import oracle.cloud.connector.api.CloudAdapterLoggingService;
+import oracle.cloud.connector.api.CloudInvocationContext;
+import oracle.cloud.connector.api.CloudInvocationException;
+import oracle.cloud.connector.api.CloudMessage;
+import oracle.cloud.connector.api.CloudRuntimeConstants;
+import oracle.cloud.connector.api.MessageHeader;
+import oracle.cloud.connector.api.MessageType;
+import oracle.cloud.connector.api.RemoteApplicationAuthenticationException;
+import oracle.cloud.connector.impl.HTTPHeaderBuilder;
+import oracle.cloud.connector.impl.RESTCloudMessage;
+import oracle.cloud.connector.impl.RESTFaultGenerator;
+import oracle.cloud.connector.impl.RESTMessageHandler;
+import oracle.cloud.connector.impl.rest.RESTConstants;
+import oracle.tip.tools.ide.adapters.cloud.api.plugin.AdapterPluginContext;
+import oracle.tip.tools.ide.adapters.cloud.impl.util.rest.RESTHelper;
+import org.json.JSONObject;
+
+/**
+ *
+ * @author Tushar.Srivastava
+ *
+ */
+public class EbayMessageHandler extends RESTMessageHandler {
+    private CloudInvocationContext context = null;
+    private CloudAdapterLoggingService logger;
+    private EbaySignature signature;
+    private JsonNode rootNode = null;
+    private StringBuilder sb = new StringBuilder();
+    private BufferedReader br = null;
+    private String line = null;
+    private String accessToken;
+    private String operationPath;
+    private Map<String, String> responce = new HashMap<>();
+
+
+    public boolean handleRequestMessage(CloudInvocationContext context, CloudMessage message)
+            throws CloudInvocationException {
+        this.context = context;
+        logger = context.getLoggingService();
+        logger.logInfo("[EbayMessageHandler] -> handleRequestMessage() invoked. ");
+        try {
+            getMessageSecurityHandler().addSecurityConfiguration((RESTCloudMessage) message, context);
+            accessToken = findHeader(message.getHeaders(), EbayCloudAdapterConstants.AUTHORIZATION);
+            processRequestMessageExecution(context, message);
+        } catch (Exception e) {
+            logger.logError("[EbayMessageHandler] error occured in handleRequestMessage", e);
+            throw RESTFaultGenerator.RequestHandler.headerProcessingException(e, context);
+        }
+        logger.logInfo("[EbayMessageHandler] handleRequestMessage() successfully completed.");
+        return true;
+    }
+
+    private void processRequestMessageExecution(CloudInvocationContext context, CloudMessage message)
+            throws CloudInvocationException {
+        @SuppressWarnings("unchecked")
+        Map<String, String> operationProperties = context.getCloudOperationProperties();
+        operationPath = operationProperties.get(CloudRuntimeConstants.OPERATION_PATH);
+        logger.logInfo("[EbayMessageHandler] Operation path  " + operationPath + "::" + operationProperties);
+
+        String httpMethod = operationProperties.get(RESTConstants.HTTP_VERB).toUpperCase();
+        String requestMediaType = operationProperties.get(RESTConstants.REQUEST_MEDIA_TYPE);
+        try {
+            logger.logInfo("[EbayMessageHandler] Operation path before replacing params: " + operationPath + "::"
+                    + httpMethod);
+            // message.getMessagePayload() != null (This condition is for put operation
+            // where we don't have payload at all)
+            if (!httpMethod.equalsIgnoreCase(HttpMethod.DELETE) && !httpMethod.equalsIgnoreCase(HttpMethod.GET)
+                    && (message.getMessagePayload() != null)) {
+                MediaType mediaType = MediaType.valueOf(requestMediaType);
+                logger.logInfo("[EbayMessageHandler] translating message from XML ...");
+                translateMessageFromXML(context, message, mediaType);
+                message.setMessagePayload(convertMessagePayloadToString(message));
+            } else {
+                logger.logInfo("[EbayMessageHandler] No request message payload.");
+            }
+            String targetOprName = context.getTargetOperationName();
+            String headerValue = findHeader(message.getHeaders(), EbayCloudAdapterConstants.X_EBAY_C_MARKETPLACE_ID);
+            String operationSupportDgtlSign = operationProperties.get(EbayCloudAdapterConstants.DIGITAL_OPERATION);
+
+            if (operationSupportDgtlSign!=null && operationSupportDgtlSign.equals(targetOprName)) {
+                String regions = operationProperties.get(EbayCloudAdapterConstants.DIGITAL_REGION);
+
+                List<String> headerRegionSupportDgtlSign = Arrays.asList(regions.split(","));
+
+                if (!headerRegionSupportDgtlSign.isEmpty() && headerRegionSupportDgtlSign.contains(headerValue)) {
+                    Map<String, String> signatureKeys = generatePrivateAndJweKey();
+                    RESTCloudMessage restCloudMessage = (RESTCloudMessage) message;
+                    Map<String, String> templateParameters = restCloudMessage.getTemplateParameters();
+                    StringBuilder operationDPath = new StringBuilder(operationProperties.get(CloudRuntimeConstants.OPERATION_PATH));
+
+                    signature = new EbaySignature(signatureKeys.get(EbayCloudAdapterConstants.PRIVATEKEY), signatureKeys.get(EbayCloudAdapterConstants.JWE));
+                    signature.loadSignatureConfig(templateParameters, httpMethod, operationDPath);
+                    signature.getSignedRequest(responce, (String) message.getMessagePayload());
+                    message.addMessageHeader(buildHeader(EbayCloudAdapterConstants.X_EBAY_SIGNATURE_HEADER, responce.get("x-ebay-signature-key")));
+                    message.addMessageHeader(buildHeader(EbayCloudAdapterConstants.SIGNATURE_INPUT_HEADER, responce.get("Signature-Input")));
+                    message.addMessageHeader(buildHeader(EbayCloudAdapterConstants.SIGNATURE_HEADER, responce.get("Signature")));
+//                    message.addMessageHeader(buildHeader(EbayCloudAdapterConstants.X_EBAY_ENFORCE_SIGNATURE, "true"));
+                    if (responce.containsKey("Content-Digest")) {
+                        message.addMessageHeader(buildHeader(EbayCloudAdapterConstants.CONTENT_DIGEST_HEADER, responce.get("Content-Digest")));
+                    }
+                }
+            }
+        } catch (Exception exp) {
+            logger.logError(exp.getMessage(), exp);
+            throw RESTFaultGenerator.RequestHandler.headerProcessingException(exp, context);
+        }
+        context.setContextObject(CloudRuntimeConstants.TARGET_OPERATION, httpMethod);
+        context.setContextObject(CloudRuntimeConstants.OPERATION_PATH, operationPath);
+        message.addMessageHeader(
+                buildHeader(RESTConstants.HEADER.CONTENT_TYPE, oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConstants.APPLICATION_OR_JSON));
+        message.addMessageHeader(buildHeader(RESTConstants.HEADER.ACCEPT, "application/json"));
+    }
+
+    private MessageHeader buildHeader(String name, String value) {
+        HTTPHeaderBuilder headerBuilder = new HTTPHeaderBuilder();
+        headerBuilder.setName(name);
+        headerBuilder.addValue(value);
+        return headerBuilder.build();
+    }
+
+    @Override
+    public boolean handleErrorMessage(CloudInvocationContext paramCloudInvocationContext,
+                                      CloudMessage paramCloudMessage) throws CloudInvocationException {
+
+        java.lang.Object runtimeException = context.getContextObject(CloudRuntimeConstants.RUNTIME_EXCEPTION);
+
+        if (runtimeException instanceof RemoteApplicationAuthenticationException) {
+            logger.logInfo(
+                    "[EbayMessageHandler] remoteApplicationAuthenticationException - passing to REST message security handler...");
+            getMessageSecurityHandler().handleAuthenticationErrorMessage(context, paramCloudMessage);
+        }
+        return false;
+    }
+
+    @Override
+    protected QName getRequestElementQName() {
+        String localName = (String) context.getCloudOperationProperties().get(RESTConstants.REQUEST_ELEMENT_NAME);
+        String nameSpace = (String) context.getCloudOperationProperties().get(RESTConstants.REQUEST_ELEMENT_NS);
+        return new QName(nameSpace, localName);
+    }
+
+    @Override
+    protected QName getResponseElementQName() {
+
+        String localName = (String) context.getCloudOperationProperties().get(RESTConstants.RESPONSE_ELEMENT_NAME);
+        String nameSpace = (String) context.getCloudOperationProperties().get(RESTConstants.RESPONSE_ELEMENT_NS);
+        return new QName(nameSpace, localName);
+    }
+
+    @Override
+    public boolean handleResponseMessage(CloudInvocationContext paramCloudInvocationContext,
+                                         CloudMessage paramCloudMessage) throws CloudInvocationException {
+        /*
+         * Translating json to xml whenever payload length is greater than zero
+         */
+        Object msg = paramCloudMessage.getMessagePayload();
+        MessageType mt = paramCloudMessage.getPayloadMessageType();
+        if (mt.equals(MessageType.XML)) {
+            return true;
+        }
+        if (msg != null && ((byte[]) msg).length > 0) {
+            String responseMediaType = (String) context.getCloudOperationProperties()
+                    .get(RESTConstants.RESPONSE_MEDIA_TYPE);
+            if (StringUtils.isEmptyOrNull(responseMediaType)) {
+                responseMediaType = oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConstants.APPLICATION_OR_JSON;
+            }
+            MediaType mediaType = MediaType.valueOf(responseMediaType);
+            logger.logInfo("[EbayMessageHandler] translating message to XML ...");
+            translateMessageToXML(context, paramCloudMessage, mediaType);
+            logger.logInfo("[EbayMessageHandler] handleResponseMessage() successfully transformed to xml.");
+
+        }
+        return true;
+    }
+
+    public String convertMessagePayloadToString(CloudMessage message) throws CloudInvocationException {
+        StringBuilder sb = new StringBuilder();
+        try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(
+                (byte[]) message.getMessagePayload());
+             BufferedReader br = new BufferedReader(new InputStreamReader(byteArrayInputStream))) {
+
+            String line;
+            while ((line = br.readLine()) != null) {
+                // Fix for Bug : 34588810 Avoiding empty request elements
+                if (!(line.contains("\"\""))) {
+                    sb.append(line);
+                }
+            }
+
+        } catch (IOException e) {
+            throw new CloudInvocationException("Error in converting  request message to String", e);
+        }
+        return sb.toString();
+    }
+
+    public Map<String, String> generatePrivateAndJweKey() {
+        JSONObject json = new JSONObject();
+        json.put(EbayCloudAdapterConstants.SIGNING_KEY_CIPHER, EbayCloudAdapterConstants.ED25519VALUE);
+        byte[] payloadBytes = json.toString().getBytes(StandardCharsets.UTF_8);
+        try {
+            String oprPath = null;
+            URL url = null;
+            char charToFind = 'm';
+            int index = operationPath.indexOf(String.valueOf(charToFind));
+            String replacedEndpoint = null;
+            if (index != -1) {
+                String firstPart = operationPath.substring(0, index + 1);
+                replacedEndpoint = firstPart + EbayCloudAdapterConstants.KEY_MANAGEMENT;
+            }
+            if (replacedEndpoint.contains("apiz")) {
+                url = new URL(replacedEndpoint);
+            } else {
+                oprPath = replacedEndpoint.replace("api", "apiz");
+                url = new URL(oprPath);
+
+            }
+            Map<String, Object> headerMap = getHeaders(accessToken);
+            InputStream inputStream = RESTHelper.invokePostRequest(url, payloadBytes, headerMap, MediaType.APPLICATION_JSON_TYPE);
+            br = new BufferedReader(new InputStreamReader(inputStream));
+            sb = new StringBuilder();
+
+            while ((line = br.readLine()) != null) {
+
+                sb.append(line);
+            }
+            String sb1 = sb.toString();
+            ObjectMapper mapper = new ObjectMapper();
+            rootNode = mapper.readTree(sb1);
+            Map<String, String> keys = new HashMap<>();
+            String privateKey = String.valueOf(rootNode.get(EbayCloudAdapterConstants.PRIVATEKEY)).replace("\"", "");
+            String jwe = String.valueOf(rootNode.get(EbayCloudAdapterConstants.JWE)).replace("\"", "");
+            keys.put(EbayCloudAdapterConstants.PRIVATEKEY, privateKey);
+            keys.put(EbayCloudAdapterConstants.JWE, jwe);
+            return keys;
+        } catch (IOException exception) {
+            logger.logError(" -> digitalSignature Supporting operation\"" + exception.getMessage(), exception);
+        }
+        return null;
+
+    }
+
+
+    private static Map<String, Object> getHeaders(String accessToken) {
+        Map<String, Object> headerMap = new HashMap<>();
+        headerMap.put("Content-type", MediaType.valueOf("application/json"));
+        headerMap.put("Authorization", accessToken);
+        return headerMap;
+    }
+
+    public String findHeader(List<MessageHeader> msgHeader, String headerName) {
+        String headerValue = "";
+        String accessToken;
+        for (MessageHeader header : msgHeader) {
+            if (header.getHeaderName().equals(headerName)) {
+                accessToken = header.getValue().toString();
+                accessToken = accessToken.trim();
+                header.setValue(accessToken);
+                if (accessToken.contains(EbayCloudAdapterConstants.USER_ACCESS_TOKEN)) {
+                    accessToken = accessToken.replace(EbayCloudAdapterConstants.USER_ACCESS_TOKEN, EbayCloudAdapterConstants.BEARER);
+                    header.setValue(accessToken);
+                }
+                if (accessToken.contains(EbayCloudAdapterConstants.APPLICATION_ACCESS_TOKEN)) {
+                    accessToken = accessToken.replace(EbayCloudAdapterConstants.APPLICATION_ACCESS_TOKEN, EbayCloudAdapterConstants.BEARER);
+                    header.setValue(accessToken);
+                }
+                headerValue = (String) header.getValue();
+            }
+        }
+        return headerValue;
+    }
+}
