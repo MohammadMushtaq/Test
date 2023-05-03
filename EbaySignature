@@ -1,0 +1,104 @@
+package oracle.cloud.adapter.ebay.runtime.digitalsignature;
+
+import oracle.cloud.adapter.ebay.designtime.EbayCloudAdapterConstants;
+import oracle.cloud.adapter.ebay.runtime.EbayMessageHandler;
+import oracle.cloud.connector.api.*;
+import oracle.cloud.connector.impl.RESTCloudMessage;
+import oracle.cloud.connector.impl.rest.RESTConstants;
+import org.apache.commons.lang3.StringUtils;
+
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.security.SignatureException;
+import java.util.*;
+
+public class EbaySignature extends EbayMessageHandler {
+    public EbaySignatureConfig signatureConfig;
+    public EbaySignatureService signatureService;
+    private CloudAdapterLoggingService logger;
+    public URL url;
+
+    public EbaySignature(String privateKey, String jwe) {
+        signatureService = new EbaySignatureService();
+        signatureConfig = new EbaySignatureConfig();
+        signatureConfig.setPrivateKeyStr(privateKey);
+        signatureConfig.setJwe(jwe);
+    }
+
+    /**
+     * Get Request signed
+     */
+    public Map<String, String> getSignedRequest(Map<String, String> response, String body) {
+
+        try {
+            String contentDigest = signatureService.generateContentDigest(body,signatureConfig);
+            String signatureKeyHeader = signatureConfig.getJwe();
+            Map<String, String> headers = new HashMap<>();
+            if (StringUtils.isNotBlank(contentDigest)) {
+                headers.put(EbayCloudAdapterConstants.CONTENT_DIGEST, contentDigest);
+                response.put(EbayCloudAdapterConstants.CONTENT_DIGEST_HEADER, contentDigest);
+            }
+            headers.put(EbayCloudAdapterConstants.X_EBAY_SIGNATURE_HEADER, signatureKeyHeader);
+            response.put(EbayCloudAdapterConstants.X_EBAY_SIGNATURE_HEADER, signatureKeyHeader);
+            response.put(EbayCloudAdapterConstants.SIGNATURE_HEADER, signatureService.getSignature(headers, signatureConfig));
+            response.put(EbayCloudAdapterConstants.SIGNATURE_INPUT_HEADER, generateSignatureInput(contentDigest,
+                    signatureConfig.getSignatureParams()));
+            return response;
+
+        } catch (CloudInvocationException e) {
+                logger.logError(e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Generate Signature Input header
+     * @return signatureInputHeader signature key header
+     */
+    public String generateSignatureInput(String contentDigest, List<String> signatureParams) {
+        return EbayCloudAdapterConstants.SIGNATURE_INPUT_PREFIX + signatureService.getSignatureInput(contentDigest, signatureParams);
+    }
+
+    /**
+     * Load config value into SignatureConfig Object
+     * @return SignatureConfig signature config
+     */
+
+    public EbaySignatureConfig loadSignatureConfig(Map<String, String> templateParameters, String method, StringBuilder operationPath) throws CloudInvocationException {
+        if (!(templateParameters == null)) {
+            Set<String> keySet = templateParameters.keySet();
+            Iterator itr = keySet.iterator();
+
+            while (itr.hasNext()) {
+                String name = (String) itr.next();
+                String value = templateParameters.get(name);
+                if (value != null && value.trim().length() != 0) {
+                    String param = "{" + name + "}";
+                    int index = operationPath.indexOf(param);
+                    if (index != -1) {
+                        operationPath.replace(index, index + param.length(), value);
+                    }
+                }
+            }
+        }
+        String operationUrl = String.valueOf(operationPath);
+        try {
+            url = new URL(operationUrl);
+            signatureConfig.setMethod(method);
+            signatureConfig.setAuthority(url.getHost());
+            signatureConfig.setPath(url.getFile());
+            signatureConfig.setDigestAlgorithm(EbayCloudAdapterConstants.SHA256);
+            signatureConfig.setAlgorithm(EbayCloudAdapterConstants.ED25519);
+            signatureConfig.setSignatureParams(new ArrayList<>());
+            signatureConfig.getSignatureParams().add(EbayCloudAdapterConstants.CONTENT_DIGEST);
+            signatureConfig.getSignatureParams().add(EbayCloudAdapterConstants.X_EBAY_SIGNATURE_HEADER);
+            signatureConfig.getSignatureParams().add(EbayCloudAdapterConstants.METHOD);
+            signatureConfig.getSignatureParams().add(EbayCloudAdapterConstants.PATH);
+            signatureConfig.getSignatureParams().add(EbayCloudAdapterConstants.AUTHORITY);
+        } catch (MalformedURLException e) {
+            logger.logError("Signature configuration properties error occurred in loadSignatureConfig method" + e.getMessage(), e);
+            throw new CloudInvocationException(e);
+        }
+        return signatureConfig;
+    }
+}
